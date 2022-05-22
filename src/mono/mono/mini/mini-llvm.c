@@ -975,7 +975,6 @@ op_to_llvm_type (int opcode)
 	case OP_RCONV_TO_U8:
 		return LLVMInt64Type ();
 	case OP_FCONV_TO_I:
-	case OP_FCONV_TO_U:
 		return TARGET_SIZEOF_VOID_P == 8 ? LLVMInt64Type () : LLVMInt32Type ();
 	case OP_IADD_OVF:
 	case OP_IADD_OVF_UN:
@@ -7367,7 +7366,7 @@ process_bb (EmitContext *ctx, MonoBasicBlock *bb)
 				ctx->module->objc_selector_to_var = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
 				LLVMValueRef info_var = LLVMAddGlobal (ctx->lmodule, LLVMArrayType (LLVMInt8Type (), 8), "@OBJC_IMAGE_INFO");
-				int32_t objc_imageinfo [] = { 0, 16 };
+				int32_t objc_imageinfo [] = { 0, 0 };
 				LLVMSetInitializer (info_var, mono_llvm_create_constant_data_array ((uint8_t *) &objc_imageinfo, 8));
 				LLVMSetLinkage (info_var, LLVMPrivateLinkage);
 				LLVMSetExternallyInitialized (info_var, TRUE);

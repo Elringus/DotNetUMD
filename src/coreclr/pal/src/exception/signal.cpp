@@ -114,10 +114,6 @@ struct sigaction g_previous_sigabrt;
 
 #if !HAVE_MACH_EXCEPTIONS
 
-// Offset of the local variable containing pointer to windows style context in the common_signal_handler function.
-// This offset is relative to the frame pointer.
-int g_common_signal_handler_context_locvar_offset = 0;
-
 // TOP of special stack for handling stack overflow
 volatile void* g_stackOverflowHandlerStack = NULL;
 
@@ -845,6 +841,15 @@ PAL_ERROR InjectActivationInternal(CorUnix::CPalThread* pThread)
     // We can get EAGAIN when printing stack overflow stack trace and when other threads hit
     // stack overflow too. Those are held in the sigsegv_handler with blocked signals until
     // the process exits.
+
+#ifdef __APPLE__
+    // On Apple, pthread_kill is not allowed to be sent to dispatch queue threads
+    if (status == ENOTSUP)
+    {
+        return ERROR_NOT_SUPPORTED;
+    }
+#endif
+
     if ((status != 0) && (status != EAGAIN))
     {
         // Failure to send the signal is fatal. There are only two cases when sending
@@ -922,11 +927,12 @@ static bool common_signal_handler(int code, siginfo_t *siginfo, void *sigcontext
 #if !HAVE_MACH_EXCEPTIONS
     sigset_t signal_set;
     CONTEXT signalContextRecord;
+    CONTEXT* signalContextRecordPtr = &signalContextRecord;
     EXCEPTION_RECORD exceptionRecord;
     native_context_t *ucontext;
 
     ucontext = (native_context_t *)sigcontext;
-    g_common_signal_handler_context_locvar_offset = (int)((char*)&signalContextRecord - (char*)__builtin_frame_address(0));
+    g_hardware_exception_context_locvar_offset = (int)((char*)&signalContextRecordPtr - (char*)__builtin_frame_address(0));
 
     if (code == (SIGSEGV | StackOverflowFlag))
     {

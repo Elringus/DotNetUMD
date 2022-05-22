@@ -358,6 +358,52 @@ namespace Microsoft.WebAssembly.Diagnostics
         Line
     }
 
+    internal record ArrayDimensions
+    {
+        internal int Rank { get; }
+        internal int [] Bounds { get; }
+        internal int TotalLength { get; }
+        public ArrayDimensions(int [] rank)
+        {
+            Rank = rank.Length;
+            Bounds = rank;
+            TotalLength = 1;
+            for (int i = 0 ; i < Rank ; i++)
+                TotalLength *= Bounds[i];
+        }
+
+        public override string ToString()
+        {
+            return $"{string.Join(", ", Bounds)}";
+        }
+        internal string GetArrayIndexString(int idx)
+        {
+            if (idx < 0 || idx >= TotalLength)
+                return "Invalid Index";
+            int boundLimit = 1;
+            int lastBoundLimit = 1;
+            int[] arrayStr = new int[Rank];
+            int rankStart = 0;
+            while (idx > 0)
+            {
+                boundLimit = 1;
+                for (int i = Rank - 1; i >= rankStart; i--)
+                {
+                    lastBoundLimit = boundLimit;
+                    boundLimit *= Bounds[i];
+                    if (idx < boundLimit)
+                    {
+                        arrayStr[i] = (int)(idx / lastBoundLimit);
+                        idx -= arrayStr[i] * lastBoundLimit;
+                        rankStart = i;
+                        break;
+                    }
+                }
+            }
+            return $"{string.Join(", ", arrayStr)}";
+        }
+    }
+
     internal record MethodInfoWithDebugInformation(MethodInfo Info, int DebugId, string Name);
 
     internal class TypeInfoWithDebugInformation
@@ -655,8 +701,8 @@ namespace Microsoft.WebAssembly.Diagnostics
     internal class MonoSDBHelper
     {
         private static int debuggerObjectId;
-        private static int cmdId;
-        private static int GetId() {return cmdId++;}
+        private static int cmdId = 1; //cmdId == 0 is used by events which come from runtime
+        private static int GetNewId() {return cmdId++;}
         private static int MINOR_VERSION = 61;
         private static int MAJOR_VERSION = 2;
 
@@ -710,7 +756,7 @@ namespace Microsoft.WebAssembly.Diagnostics
                     return null;
                 }
             }
-            asm.DebugId = assemblyId;
+            asm.SetDebugId(assemblyId);
             assemblies[assemblyId] = asm;
             return asm;
         }
@@ -823,7 +869,7 @@ namespace Microsoft.WebAssembly.Diagnostics
 
         internal async Task<MonoBinaryReader> SendDebuggerAgentCommandInternal(SessionId sessionId, int command_set, int command, MemoryStream parms, CancellationToken token)
         {
-            Result res = await proxy.SendMonoCommand(sessionId, MonoCommands.SendDebuggerAgentCommand(GetId(), command_set, command, Convert.ToBase64String(parms.ToArray())), token);
+            Result res = await proxy.SendMonoCommand(sessionId, MonoCommands.SendDebuggerAgentCommand(GetNewId(), command_set, command, Convert.ToBase64String(parms.ToArray())), token);
             byte[] newBytes = Array.Empty<byte>();
             if (!res.IsErr) {
                 newBytes = Convert.FromBase64String(res.Value?["result"]?["value"]?["value"]?.Value<string>());
@@ -861,7 +907,7 @@ namespace Microsoft.WebAssembly.Diagnostics
 
         internal async Task<MonoBinaryReader> SendDebuggerAgentCommandWithParmsInternal(SessionId sessionId, int command_set, int command, MemoryStream parms, int type, string extraParm, CancellationToken token)
         {
-            Result res = await proxy.SendMonoCommand(sessionId, MonoCommands.SendDebuggerAgentCommandWithParms(GetId(), command_set, command, Convert.ToBase64String(parms.ToArray()), parms.ToArray().Length, type, extraParm), token);
+            Result res = await proxy.SendMonoCommand(sessionId, MonoCommands.SendDebuggerAgentCommandWithParms(GetNewId(), command_set, command, Convert.ToBase64String(parms.ToArray()), parms.ToArray().Length, type, extraParm), token);
             byte[] newBytes = Array.Empty<byte>();
             if (!res.IsErr) {
                 newBytes = Convert.FromBase64String(res.Value?["result"]?["value"]?["value"]?.Value<string>());
@@ -1400,7 +1446,8 @@ namespace Microsoft.WebAssembly.Diagnostics
             string className = await GetTypeNameOriginal(sessionId, typeId, token);
             className = className.Replace("+", ".");
             className = Regex.Replace(className, @"`\d+", "");
-            className = className.Replace("[]", "__SQUARED_BRACKETS__");
+            className = Regex.Replace(className, @"[[, ]+]", "__SQUARED_BRACKETS__");
+            //className = className.Replace("[]", "__SQUARED_BRACKETS__");
             className = className.Replace("[", "<");
             className = className.Replace("]", ">");
             className = className.Replace("__SQUARED_BRACKETS__", "[]");
@@ -1451,15 +1498,20 @@ namespace Microsoft.WebAssembly.Diagnostics
             }
             return null;
         }
-        public async Task<int> GetArrayLength(SessionId sessionId, int object_id, CancellationToken token)
+        public async Task<ArrayDimensions> GetArrayDimensions(SessionId sessionId, int object_id, CancellationToken token)
         {
             var commandParams = new MemoryStream();
             var commandParamsWriter = new MonoBinaryWriter(commandParams);
             commandParamsWriter.Write(object_id);
             var retDebuggerCmdReader = await SendDebuggerAgentCommand<CmdArray>(sessionId, CmdArray.GetLength, commandParams, token);
             var length = retDebuggerCmdReader.ReadInt32();
-            length = retDebuggerCmdReader.ReadInt32();
-            return length;
+            var rank = new int[length];
+            for (int i = 0 ; i < length; i++)
+            {
+                rank[i] = retDebuggerCmdReader.ReadInt32();
+                retDebuggerCmdReader.ReadInt32(); //lower_bound
+            }
+            return new ArrayDimensions(rank);
         }
         public async Task<List<int>> GetTypeIdFromObject(SessionId sessionId, int object_id, bool withParents, CancellationToken token)
         {
@@ -1778,9 +1830,14 @@ namespace Microsoft.WebAssembly.Diagnostics
         public async Task<JObject> CreateJObjectForArray(SessionId sessionId, MonoBinaryReader retDebuggerCmdReader, CancellationToken token)
         {
             var objectId = retDebuggerCmdReader.ReadInt32();
-            var value = await GetClassNameFromObject(sessionId, objectId, token);
-            var length = await GetArrayLength(sessionId, objectId, token);
-            return CreateJObject<string>(null, "object", $"{value.ToString()}({length})", false, value.ToString(), "dotnet:array:" + objectId, null, "array");
+            var className = await GetClassNameFromObject(sessionId, objectId, token);
+            var arrayType = className.ToString();
+            var length = await GetArrayDimensions(sessionId, objectId, token);
+            if (arrayType.LastIndexOf('[') > 0)
+                arrayType = arrayType.Insert(arrayType.LastIndexOf('[')+1, length.ToString());
+            if (className.LastIndexOf('[') > 0)
+                className = className.Insert(arrayType.LastIndexOf('[')+1, new string(',', length.Rank-1));
+            return CreateJObject<string>(null, "object", description : arrayType, writable : false, className.ToString(), "dotnet:array:" + objectId, null, subtype : length.Rank == 1 ? "array" : null);
         }
 
         public async Task<JObject> CreateJObjectForObject(SessionId sessionId, MonoBinaryReader retDebuggerCmdReader, int typeIdFromAttribute, bool forDebuggerDisplayAttribute, CancellationToken token)
@@ -2196,7 +2253,8 @@ namespace Microsoft.WebAssembly.Diagnostics
                                 commandSet = CommandSet.Vm,
                                 command = CmdVM.InvokeMethod,
                                 buffer = Convert.ToBase64String(command_params_to_proxy.ToArray()),
-                                length = command_params_to_proxy.ToArray().Length
+                                length = command_params_to_proxy.ToArray().Length,
+                                id = GetNewId()
                                 }),
                             name = propertyNameStr
                         }));
@@ -2206,21 +2264,33 @@ namespace Microsoft.WebAssembly.Diagnostics
 
         public async Task<JArray> GetArrayValues(SessionId sessionId, int arrayId, CancellationToken token)
         {
-            var length = await GetArrayLength(sessionId, arrayId, token);
+            var dimensions = await GetArrayDimensions(sessionId, arrayId, token);
             var commandParams = new MemoryStream();
             var commandParamsWriter = new MonoBinaryWriter(commandParams);
             commandParamsWriter.Write(arrayId);
             commandParamsWriter.Write(0);
-            commandParamsWriter.Write(length);
+            commandParamsWriter.Write(dimensions.TotalLength);
             var retDebuggerCmdReader = await SendDebuggerAgentCommand<CmdArray>(sessionId, CmdArray.GetValues, commandParams, token);
             JArray array = new JArray();
-            for (int i = 0 ; i < length ; i++)
+            for (int i = 0 ; i < dimensions.TotalLength; i++)
             {
-                var var_json = await CreateJObjectForVariableValue(sessionId, retDebuggerCmdReader, i.ToString(), false, -1, false, token);
+                var var_json = await CreateJObjectForVariableValue(sessionId, retDebuggerCmdReader, dimensions.GetArrayIndexString(i), isOwn : false, -1, forDebuggerDisplayAttribute : false, token);
                 array.Add(var_json);
             }
             return array;
         }
+
+        public async Task<JObject> GetArrayValuesProxy(SessionId sessionId, int arrayId, CancellationToken token)
+        {
+            var length = await GetArrayDimensions(sessionId, arrayId, token);
+            var arrayProxy = JObject.FromObject(new
+            {
+                items = await GetArrayValues(sessionId, arrayId, token),
+                dimensionsDetails = length.Bounds
+            });
+            return arrayProxy;
+        }
+
         public async Task<bool> EnableExceptions(SessionId sessionId, PauseOnExceptionsKind state, CancellationToken token)
         {
             if (state == PauseOnExceptionsKind.Unset)
@@ -2401,7 +2471,8 @@ namespace Microsoft.WebAssembly.Diagnostics
                                         command = CmdObject.RefSetValues,
                                         buffer = Convert.ToBase64String(command_params_to_set.ToArray()),
                                         valtype,
-                                        length = command_params_to_set.ToArray().Length
+                                        length = command_params_to_set.ToArray().Length,
+                                        id = GetNewId()
                                 }));
                         }
                         objectFields.Add(fieldValue);
@@ -2495,7 +2566,8 @@ namespace Microsoft.WebAssembly.Diagnostics
                                         command = CmdVM.InvokeMethod,
                                         buffer = Convert.ToBase64String(command_params_to_set.ToArray()),
                                         valtype = attr["set"]["valtype"],
-                                        length = command_params_to_set.ToArray().Length
+                                        length = command_params_to_set.ToArray().Length,
+                                        id = GetNewId()
                                 });
                         }
                         continue;
@@ -2514,7 +2586,8 @@ namespace Microsoft.WebAssembly.Diagnostics
                                     commandSet = CommandSet.Vm,
                                     command = CmdVM.InvokeMethod,
                                     buffer = Convert.ToBase64String(command_params_to_get.ToArray()),
-                                    length = command_params_to_get.ToArray().Length
+                                    length = command_params_to_get.ToArray().Length,
+                                    id = GetNewId()
                                     }),
                                 name = propertyNameStr
                             }));

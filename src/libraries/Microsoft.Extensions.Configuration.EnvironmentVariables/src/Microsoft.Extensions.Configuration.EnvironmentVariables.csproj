@@ -4,6 +4,7 @@
     <TargetFrameworks>netstandard2.0;net461</TargetFrameworks>
     <EnableDefaultItems>true</EnableDefaultItems>
     <PackageDescription>Environment variables configuration provider implementation for Microsoft.Extensions.Configuration.</PackageDescription>
+    <ServicingVersion>1</ServicingVersion>
   </PropertyGroup>
 
   <ItemGroup>

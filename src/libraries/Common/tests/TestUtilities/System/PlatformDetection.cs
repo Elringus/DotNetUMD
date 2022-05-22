@@ -48,6 +48,7 @@ namespace System
         public static bool IsNotArm64Process => !IsArm64Process;
         public static bool IsArmOrArm64Process => IsArmProcess || IsArm64Process;
         public static bool IsNotArmNorArm64Process => !IsArmOrArm64Process;
+        public static bool IsX86Process => RuntimeInformation.ProcessArchitecture == Architecture.X86;
         public static bool IsArgIteratorSupported => IsMonoRuntime || (IsWindows && IsNotArmProcess);
         public static bool IsArgIteratorNotSupported => !IsArgIteratorSupported;
         public static bool Is32BitProcess => IntPtr.Size == 4;
@@ -189,7 +190,12 @@ namespace System
 
             if (IsOpenSslSupported)
             {
-                return OpenSslVersion.Major >= 1 && (OpenSslVersion.Minor >= 1 || OpenSslVersion.Build >= 2);
+                if (OpenSslVersion.Major >= 3)
+                {
+                    return true;
+                }
+
+                return OpenSslVersion.Major == 1 && (OpenSslVersion.Minor >= 1 || OpenSslVersion.Build >= 2);
             }
 
             if (IsAndroid)
@@ -333,34 +339,64 @@ namespace System
             return (IsLinux && File.Exists("/.dockerenv"));
         }
 
+        private static bool GetProtocolSupportFromWindowsRegistry(SslProtocols protocol, bool defaultProtocolSupport, bool disabledByDefault = false)
+        {
+            string registryProtocolName = protocol switch
+            {
+#pragma warning disable CS0618 // Ssl2 and Ssl3 are obsolete
+                SslProtocols.Ssl3 => "SSL 3.0",
+#pragma warning restore CS0618
+                SslProtocols.Tls => "TLS 1.0",
+                SslProtocols.Tls11 => "TLS 1.1",
+                SslProtocols.Tls12 => "TLS 1.2",
+#if !NETFRAMEWORK
+                SslProtocols.Tls13 => "TLS 1.3",
+#endif
+                _ => throw new Exception($"Registry key not defined for {protocol}.")
+            };
+
+            string clientKey = @$"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\{registryProtocolName}\Client";
+            string serverKey = @$"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\{registryProtocolName}\Server";
+
+            object client, server;
+            object clientDefault, serverDefault;
+            try
+            {
+                client = Registry.GetValue(clientKey, "Enabled", defaultProtocolSupport ? 1 : 0);
+                server = Registry.GetValue(serverKey, "Enabled", defaultProtocolSupport ? 1 : 0);
+
+                clientDefault = Registry.GetValue(clientKey, "DisabledByDefault", 1);
+                serverDefault = Registry.GetValue(serverKey, "DisabledByDefault", 1);
+
+                if (client is int c && server is int s && clientDefault is int cd && serverDefault is int sd)
+                {
+                    return (c == 1 && s == 1) && (!disabledByDefault || (cd == 0 && sd == 0));
+                }
+            }
+            catch (SecurityException)
+            {
+                // Insufficient permission, assume that we don't have protocol support (since we aren't exactly sure)
+                return false;
+            }
+            catch { }
+
+            return defaultProtocolSupport;
+        }
+
         private static bool GetSsl3Support()
         {
             if (IsWindows)
             {
-                string clientKey = @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\SSL 3.0\Client";
-                string serverKey = @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\SSL 3.0\Server";
-
-                object client, server;
-                try
-                {
-                    client = Registry.GetValue(clientKey, "Enabled", null);
-                    server = Registry.GetValue(serverKey, "Enabled", null);
-                }
-                catch (SecurityException)
-                {
-                    // Insufficient permission, assume that we don't have SSL3 (since we aren't exactly sure)
-                    return false;
-                }
-
-                if (client is int c && server is int s)
-                {
-                    return c == 1 && s == 1;
-                }
 
                 // Missing key. If we're pre-20H1 then assume SSL3 is enabled.
                 // Otherwise, disabled. (See comments on https://github.com/dotnet/runtime/issues/1166)
                 // Alternatively the returned values must have been some other types.
-                return !IsWindows10Version2004OrGreater;
+                bool ssl3DefaultSupport = !IsWindows10Version2004OrGreater;
+
+#pragma warning disable CS0618 // Ssl2 and Ssl3 are obsolete
+                return GetProtocolSupportFromWindowsRegistry(SslProtocols.Ssl3, ssl3DefaultSupport);
+#pragma warning restore CS0618
+
             }
 
             return (IsOSX || (IsLinux && OpenSslVersion < new Version(1, 0, 2) && !IsDebian));
@@ -383,10 +419,16 @@ namespace System
 
         private static bool GetTls10Support()
         {
-            // on Windows, macOS, and Android TLS1.0/1.1 are supported.
-            if (IsWindows || IsOSXLike || IsAndroid)
+            // on macOS and Android TLS 1.0 is supported.
+            if (IsOSXLike || IsAndroid)
             {
                 return true;
+            }
+
+            // Windows depend on registry, enabled by default on all supported versions.
+            if (IsWindows)
+            {
+                return GetProtocolSupportFromWindowsRegistry(SslProtocols.Tls, defaultProtocolSupport: true) && !IsWindows10Version20348OrGreater;
             }
 
             return OpenSslGetTlsSupport(SslProtocols.Tls);
@@ -394,12 +436,18 @@ namespace System
 
         private static bool GetTls11Support()
         {
-            // on Windows, macOS, and Android TLS1.0/1.1 are supported.
-            // TLS 1.1 and 1.2 can work on Windows7 but it is not enabled by default.
             if (IsWindows)
             {
-                return !IsWindows7;
+                // TLS 1.1 can work on Windows 7 but it is disabled by default.
+                if (IsWindows7)
+                {
+                    return GetProtocolSupportFromWindowsRegistry(SslProtocols.Tls11, defaultProtocolSupport: false, disabledByDefault: true);
+                }
+
+                // It is enabled on other versions unless explicitly disabled.
+                return GetProtocolSupportFromWindowsRegistry(SslProtocols.Tls11, defaultProtocolSupport: true) && !IsWindows10Version20348OrGreater;
             }
+            // on macOS and Android TLS 1.1 is supported.
             else if (IsOSXLike || IsAndroid)
             {
                 return true;
@@ -410,8 +458,19 @@ namespace System
 
         private static bool GetTls12Support()
         {
-            // TLS 1.1 and 1.2 can work on Windows7 but it is not enabled by default.
-            return !IsWindows7;
+            if (IsWindows)
+            {
+                // TLS 1.2 can work on Windows 7 but it is disabled by default.
+                if (IsWindows7)
+                {
+                    return GetProtocolSupportFromWindowsRegistry(SslProtocols.Tls12, defaultProtocolSupport: false, disabledByDefault: true);
+                }
+
+                // It is enabled on other versions unless explicitly disabled.
+                return GetProtocolSupportFromWindowsRegistry(SslProtocols.Tls12, defaultProtocolSupport: true);
+            }
+
+            return true;
         }
 
         private static bool GetTls13Support()
@@ -422,25 +481,17 @@ namespace System
                 {
                     return false;
                 }
-
-                string clientKey = @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.3\Client";
-                string serverKey = @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.3\Server";
-
-                object client, server;
-                try
-                {
-                    client = Registry.GetValue(clientKey, "Enabled", null);
-                    server = Registry.GetValue(serverKey, "Enabled", null);
-                    if (client is int c && server is int s)
-                    {
-                        return c == 1 && s == 1;
-                    }
-                }
-                catch { }
                 // assume no if positive entry is missing on older Windows
                 // Latest insider builds have TLS 1.3 enabled by default.
                 // The build number is approximation.
-                return IsWindows10Version2004Build19573OrGreater;
+                bool defaultProtocolSupport = IsWindows10Version20348OrGreater;
+
+#if NETFRAMEWORK
+                return false;
+#else
+                return GetProtocolSupportFromWindowsRegistry(SslProtocols.Tls13, defaultProtocolSupport);
+#endif
+
             }
             else if (IsOSX || IsMacCatalyst || IsiOS || IstvOS)
             {

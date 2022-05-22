@@ -10,6 +10,7 @@ using System.Text.Json.Reflection;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Converters;
 using System.Text.Json.Serialization.Metadata;
+using System.Threading;
 
 namespace System.Text.Json
 {
@@ -30,23 +31,26 @@ namespace System.Text.Json
         [RequiresUnreferencedCode(JsonSerializer.SerializationUnreferencedCodeMessage)]
         private void RootBuiltInConverters()
         {
-            s_defaultSimpleConverters = GetDefaultSimpleConverters();
-            s_defaultFactoryConverters = new JsonConverter[]
+            if (Volatile.Read(ref s_defaultFactoryConverters) is null)
             {
-                // Check for disallowed types.
-                new UnsupportedTypeConverterFactory(),
-                // Nullable converter should always be next since it forwards to any nullable type.
-                new NullableConverterFactory(),
-                new EnumConverterFactory(),
-                new JsonNodeConverterFactory(),
-                new FSharpTypeConverterFactory(),
-                // IAsyncEnumerable takes precedence over IEnumerable.
-                new IAsyncEnumerableConverterFactory(),
-                // IEnumerable should always be second to last since they can convert any IEnumerable.
-                new IEnumerableConverterFactory(),
-                // Object should always be last since it converts any type.
-                new ObjectConverterFactory()
-            };
+                s_defaultSimpleConverters = GetDefaultSimpleConverters();
+                Volatile.Write(ref s_defaultFactoryConverters, new JsonConverter[]
+                {
+                    // Check for disallowed types.
+                    new UnsupportedTypeConverterFactory(),
+                    // Nullable converter should always be next since it forwards to any nullable type.
+                    new NullableConverterFactory(),
+                    new EnumConverterFactory(),
+                    new JsonNodeConverterFactory(),
+                    new FSharpTypeConverterFactory(),
+                    // IAsyncEnumerable takes precedence over IEnumerable.
+                    new IAsyncEnumerableConverterFactory(),
+                    // IEnumerable should always be second to last since they can convert any IEnumerable.
+                    new IEnumerableConverterFactory(),
+                    // Object should always be last since it converts any type.
+                    new ObjectConverterFactory()
+                });
+            }
         }
 
         private static Dictionary<Type, JsonConverter> GetDefaultSimpleConverters()

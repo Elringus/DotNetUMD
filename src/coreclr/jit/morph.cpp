@@ -5659,6 +5659,7 @@ GenTree* Compiler::fgMorphArrayIndex(GenTree* tree)
 
         GenTreeBoundsChk* arrBndsChk = new (this, GT_ARR_BOUNDS_CHECK)
             GenTreeBoundsChk(GT_ARR_BOUNDS_CHECK, TYP_VOID, index, arrLen, SCK_RNGCHK_FAIL);
+        arrBndsChk->gtInxType        = elemTyp;
 
         bndsChk = arrBndsChk;
 
@@ -7896,6 +7897,15 @@ GenTree* Compiler::fgMorphPotentialTailCall(GenTreeCall* call)
         // Avoid potential extra work for the return (for example, vzeroupper)
         call->gtType = TYP_VOID;
 
+        // The runtime requires that we perform a null check on the `this` argument before
+        // tail calling to a virtual dispatch stub. This requirement is a consequence of limitations
+        // in the runtime's ability to map an AV to a NullReferenceException if
+        // the AV occurs in a dispatch stub that has unmanaged caller.
+        if (call->IsVirtualStub())
+        {
+            call->gtFlags |= GTF_CALL_NULLCHECK;
+        }
+
         // Do some target-specific transformations (before we process the args,
         // etc.) for the JIT helper case.
         if (tailCallViaJitHelper)
@@ -8621,15 +8631,6 @@ void Compiler::fgMorphTailCallViaJitHelper(GenTreeCall* call)
 {
     JITDUMP("fgMorphTailCallViaJitHelper (before):\n");
     DISPTREE(call);
-
-    // The runtime requires that we perform a null check on the `this` argument before
-    // tail calling  to a virtual dispatch stub. This requirement is a consequence of limitations
-    // in the runtime's ability to map an AV to a NullReferenceException if
-    // the AV occurs in a dispatch stub that has unmanaged caller.
-    if (call->IsVirtualStub())
-    {
-        call->gtFlags |= GTF_CALL_NULLCHECK;
-    }
 
     // For the helper-assisted tail calls, we need to push all the arguments
     // into a single list, and then add a few extra at the beginning or end.

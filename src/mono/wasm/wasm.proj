@@ -12,6 +12,7 @@
     <EmccCmd>emcc</EmccCmd>
     <WasmObjDir>$(ArtifactsObjDir)wasm</WasmObjDir>
     <_EmccDefaultsRspPath>$(NativeBinDir)src\emcc-default.rsp</_EmccDefaultsRspPath>
+    <WasmNativeStrip Condition="'$(ContinuousIntegrationBuild)' == 'true'">false</WasmNativeStrip>
   </PropertyGroup>
 
   <Target Name="CheckEnv">
@@ -81,7 +82,6 @@
 
     <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
       <_EmccFlags Include="@(_EmccCommonFlags)" />
-      <_EmccFlags Include="-s USE_ZLIB=1" />
     </ItemGroup>
 
     <WriteLinesToFile File="$(_EmccDefaultsRspPath)"

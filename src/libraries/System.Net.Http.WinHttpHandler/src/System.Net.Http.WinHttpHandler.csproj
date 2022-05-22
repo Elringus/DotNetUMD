@@ -9,6 +9,7 @@
 
 Commonly Used Types:
 System.Net.Http.WinHttpHandler</PackageDescription>
+    <ServicingVersion>1</ServicingVersion>
   </PropertyGroup>
 
   <!-- DesignTimeBuild requires all the TargetFramework Derived Properties to not be present in the first property group. -->
